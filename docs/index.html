@@ -66,6 +66,8 @@
   .poster .ph { display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text2); text-align: center; padding: 8px; }
   .poster .p-name { font-size: 12px; font-weight: 500; margin-top: 6px; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .poster .p-year { font-size: 11px; color: var(--text2); margin-top: 2px; }
+  .poster .p-prog { height: 3px; background: rgba(255,255,255,0.14); border-radius: 2px; margin-top: 5px; overflow: hidden; }
+  .poster .p-prog i { display: block; height: 100%; background: var(--accent2); border-radius: 2px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px; padding: 12px 16px; }
   .grid .poster { width: 100%; }
   .grid .poster img, .grid .poster .ph { width: 100%; height: auto; aspect-ratio: 2/3; }
@@ -180,9 +182,17 @@
     <div class="field">
       <label>Clé API RealDebrid <span style="color:var(--text2);font-weight:400">(optionnel)</span></label>
       <input type="password" id="in-rd" placeholder="Ta clé API" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <div class="hint">Utile seulement si ton addon renvoie des liens non dé-restreints. Disponible sur real-debrid.com/apitoken.</div>
+      <div class="hint">Permet la conversion HLS pour lire les MKV dans Safari. Disponible sur real-debrid.com/apitoken.</div>
     </div>
     <button class="btn" id="btn-setup">Vérifier et commencer</button>
+    <div style="text-align:center;color:var(--text2);font-size:13px;margin:22px 0 18px">— ou —</div>
+    <div class="field">
+      <label>Compte Stremio</label>
+      <input type="email" id="su-email" placeholder="Email" autocapitalize="off" autocorrect="off">
+      <input type="password" id="su-password" placeholder="Mot de passe" style="margin-top:8px">
+      <div class="hint">Récupère automatiquement tes addons installés, ta bibliothèque et ton historique.</div>
+    </div>
+    <button class="btn" id="btn-setup-login" style="background:var(--surface2)">Se connecter avec Stremio</button>
     <div id="setup-msg"></div>
   </div>
 </div>
@@ -208,8 +218,22 @@
 <div class="screen" id="scr-settings">
   <div class="header"><h1>Réglages</h1></div>
   <div class="setup-wrap" style="padding-top:8px">
+    <div class="field" id="acct-logged-out">
+      <label>Compte Stremio</label>
+      <input type="email" id="in-email" placeholder="Email" autocapitalize="off" autocorrect="off">
+      <input type="password" id="in-password" placeholder="Mot de passe" style="margin-top:8px">
+      <button class="btn" id="btn-login" style="margin-top:12px">Se connecter</button>
+      <div class="hint">Récupère tes addons installés, ta bibliothèque et ton historique de visionnage.</div>
+      <div id="login-msg"></div>
+    </div>
+    <div class="field" id="acct-logged-in" style="display:none">
+      <label>Compte Stremio</label>
+      <div id="acct-info" style="font-size:14px;color:var(--text2);padding:6px 0"></div>
+      <button class="btn" id="btn-sync" style="margin-top:8px;background:var(--surface2)">Resynchroniser addons & bibliothèque</button>
+      <button class="btn" id="btn-logout" style="margin-top:10px;background:var(--surface2);color:#ff8787">Se déconnecter</button>
+    </div>
     <div class="field">
-      <label>URL de l'addon</label>
+      <label>URL de l'addon <span style="color:var(--text2);font-weight:400">(optionnel si compte connecté)</span></label>
       <input type="url" id="set-addon" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
     <div class="field">
@@ -287,9 +311,92 @@ const store = {
   set addon(v) { localStorage.setItem('addonURL', v); },
   get rdKey() { return localStorage.getItem('rdKey') || ''; },
   set rdKey(v) { localStorage.setItem('rdKey', v); },
+  get authKey() { return localStorage.getItem('authKey') || ''; },
+  set authKey(v) { localStorage.setItem('authKey', v); },
+  get userEmail() { return localStorage.getItem('userEmail') || ''; },
+  set userEmail(v) { localStorage.setItem('userEmail', v); },
+  get accountAddons() { try { return JSON.parse(localStorage.getItem('accountAddons') || '[]'); } catch (e) { return []; } },
+  set accountAddons(v) { localStorage.setItem('accountAddons', JSON.stringify(v)); },
+  get library() { try { return JSON.parse(localStorage.getItem('library') || '[]'); } catch (e) { return []; } },
+  set library(v) { localStorage.setItem('library', JSON.stringify(v)); },
+  get configured() { return !!(this.addon || this.authKey); },
   getPos(id) { return parseFloat(localStorage.getItem('pos:' + id) || '0'); },
   setPos(id, t) { localStorage.setItem('pos:' + id, String(t)); },
 };
+
+// ======================= Stremio account API =======================
+const STREMIO_API = 'https://api.strem.io/api/';
+
+async function stremioAPI(method, params) {
+  const r = await fetch(STREMIO_API + method, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params || {}),
+  });
+  const data = await r.json();
+  if (data.error) throw new Error(data.error.message || data.error.code || 'Erreur Stremio');
+  return data.result;
+}
+
+async function stremioLogin(email, password) {
+  const res = await stremioAPI('login', { email, password });
+  if (!res || !res.authKey) throw new Error('Réponse de connexion invalide');
+  store.authKey = res.authKey;
+  store.userEmail = (res.user && res.user.email) || email;
+  await syncAccount();
+}
+
+async function syncAccount() {
+  const res = await stremioAPI('addonCollectionGet', { authKey: store.authKey, update: true });
+  store.accountAddons = (res.addons || [])
+    .filter(a => a.transportUrl && a.manifest)
+    .map(a => ({ url: a.transportUrl, manifest: {
+      id: a.manifest.id,
+      name: a.manifest.name,
+      resources: a.manifest.resources,
+      types: a.manifest.types,
+      catalogs: a.manifest.catalogs,
+      idPrefixes: a.manifest.idPrefixes,
+    }}));
+  await syncLibrary().catch(() => {});
+}
+
+async function syncLibrary() {
+  const res = await stremioAPI('datastoreGet', { authKey: store.authKey, collection: 'libraryItem', ids: [], all: true });
+  const items = (res || []).filter(it => it && it._id && !it.removed);
+  items.sort((a, b) => new Date((b.state && b.state.lastWatched) || b._mtime || 0) - new Date((a.state && a.state.lastWatched) || a._mtime || 0));
+  store.library = items.slice(0, 300).map(it => ({
+    id: it._id, type: it.type, name: it.name, poster: it.poster,
+    lastWatched: it.state && it.state.lastWatched,
+    timeOffset: (it.state && it.state.timeOffset) || 0,
+    duration: (it.state && it.state.duration) || 0,
+    videoId: it.state && it.state.video_id,
+  }));
+}
+
+function stremioLogout() {
+  localStorage.removeItem('authKey');
+  localStorage.removeItem('userEmail');
+  localStorage.removeItem('accountAddons');
+  localStorage.removeItem('library');
+}
+
+function resourceNames(manifest) {
+  return (manifest && manifest.resources || []).map(r => typeof r === 'string' ? r : (r && r.name));
+}
+
+// All stream-capable addon bases: manual addon first, then account addons
+function streamAddonBases() {
+  const bases = [];
+  if (store.addon) bases.push({ base: addonBase(), name: 'Mon addon' });
+  for (const a of store.accountAddons) {
+    if (resourceNames(a.manifest).includes('stream')) {
+      bases.push({ base: a.url.replace(/\/manifest\.json$/, ''), name: a.manifest.name || 'Addon' });
+    }
+  }
+  const seen = new Set();
+  return bases.filter(x => !seen.has(x.base) && seen.add(x.base));
+}
 
 function addonBase() {
   let u = store.addon.trim();
@@ -348,9 +455,9 @@ function show(id) {
 }
 
 function route() {
-  const h = location.hash.slice(1) || (store.addon ? 'home' : 'setup');
+  const h = location.hash.slice(1) || (store.configured ? 'home' : 'setup');
   const [name, ...args] = h.split('/');
-  if (!store.addon && name !== 'setup') { location.hash = '#setup'; return; }
+  if (!store.configured && name !== 'setup') { location.hash = '#setup'; return; }
   switch (name) {
     case 'setup': show('scr-setup'); break;
     case 'home': show('scr-home'); if (!$('home-rows').childElementCount) loadHome(); break;
@@ -388,11 +495,77 @@ $('btn-setup').addEventListener('click', async () => {
   btn.disabled = false; btn.textContent = 'Vérifier et commencer';
 });
 
+// Setup screen: login with Stremio account
+$('btn-setup-login').addEventListener('click', async () => {
+  const btn = $('btn-setup-login');
+  const msg = $('setup-msg');
+  const email = $('su-email').value.trim();
+  const password = $('su-password').value;
+  if (!email || !password) { msg.innerHTML = '<div class="err-msg">Entre ton email et ton mot de passe Stremio.</div>'; return; }
+  btn.disabled = true; btn.textContent = 'Connexion…'; msg.innerHTML = '';
+  try {
+    store.rdKey = $('in-rd').value.trim() || store.rdKey;
+    await stremioLogin(email, password);
+    const n = streamAddonBases().length;
+    msg.innerHTML = '<div class="ok-msg">✓ Connecté — ' + n + ' addon(s) de streaming trouvé(s)</div>';
+    setTimeout(() => { location.hash = '#home'; loadHome(); }, 700);
+  } catch (e) {
+    msg.innerHTML = '<div class="err-msg">Connexion échouée : ' + esc(e.message) + '</div>';
+  }
+  btn.disabled = false; btn.textContent = 'Se connecter avec Stremio';
+});
+
 // ======================= Settings =======================
 function loadSettingsForm() {
   $('set-addon').value = store.addon;
   $('set-rd').value = store.rdKey;
+  const logged = !!store.authKey;
+  $('acct-logged-out').style.display = logged ? 'none' : '';
+  $('acct-logged-in').style.display = logged ? '' : 'none';
+  if (logged) {
+    const n = store.accountAddons.length;
+    $('acct-info').textContent = store.userEmail + ' · ' + n + ' addon(s) · ' + store.library.length + ' élément(s) en bibliothèque';
+  }
 }
+
+$('btn-login').addEventListener('click', async () => {
+  const btn = $('btn-login');
+  const msg = $('login-msg');
+  const email = $('in-email').value.trim();
+  const password = $('in-password').value;
+  if (!email || !password) { msg.innerHTML = '<div class="err-msg">Email et mot de passe requis.</div>'; return; }
+  btn.disabled = true; btn.textContent = 'Connexion…'; msg.innerHTML = '';
+  try {
+    await stremioLogin(email, password);
+    $('home-rows').innerHTML = '';
+    loadSettingsForm();
+    toast('✓ Compte connecté');
+  } catch (e) {
+    msg.innerHTML = '<div class="err-msg">Connexion échouée : ' + esc(e.message) + '</div>';
+  }
+  btn.disabled = false; btn.textContent = 'Se connecter';
+});
+
+$('btn-sync').addEventListener('click', async () => {
+  const btn = $('btn-sync');
+  btn.disabled = true; btn.textContent = 'Synchronisation…';
+  try {
+    await syncAccount();
+    $('home-rows').innerHTML = '';
+    loadSettingsForm();
+    toast('✓ Synchronisé');
+  } catch (e) {
+    toast('⚠️ ' + e.message);
+  }
+  btn.disabled = false; btn.textContent = 'Resynchroniser addons & bibliothèque';
+});
+
+$('btn-logout').addEventListener('click', () => {
+  stremioLogout();
+  $('home-rows').innerHTML = '';
+  loadSettingsForm();
+  toast('Déconnecté');
+});
 $('btn-save').addEventListener('click', async () => {
   const msg = $('settings-msg');
   let base = $('set-addon').value.trim().replace(/\/$/, '').replace(/\/manifest\.json$/, '');
@@ -409,19 +582,21 @@ $('btn-save').addEventListener('click', async () => {
 
 // ======================= Home =======================
 async function ensureManifest() {
+  if (!store.addon) return null;
   if (!addonManifest) {
     try { addonManifest = await getJSON(addonBase() + '/manifest.json'); } catch (e) { addonManifest = null; }
   }
   return addonManifest;
 }
 
-function posterHTML(m) {
+function posterHTML(m, progress) {
   const img = m.poster
     ? '<img loading="lazy" src="' + esc(m.poster) + '" onerror="this.outerHTML=\'<div class=ph>' + esc(m.name).replace(/'/g, '') + '</div>\'">'
     : '<div class="ph">' + esc(m.name) + '</div>';
   const year = m.releaseInfo || m.year || '';
   return '<div class="poster" onclick="location.hash=\'#detail/' + esc(m.type) + '/' + encodeURIComponent(m.id) + '\'">'
     + img
+    + (progress > 0 && progress < 1 ? '<div class="p-prog"><i style="width:' + Math.round(progress * 100) + '%"></i></div>' : '')
     + '<div class="p-name">' + esc(m.name) + '</div>'
     + (year ? '<div class="p-year">' + esc(year) + '</div>' : '')
     + '</div>';
@@ -437,40 +612,76 @@ function rowHTML(title, metas, seeAllHash) {
     + '</div>';
 }
 
+function libraryRowsHTML() {
+  const lib = store.library;
+  if (!lib.length) return '';
+  let html = '';
+  const inProgress = lib.filter(it => it.timeOffset > 60000 && it.duration > 0 && it.timeOffset < it.duration * 0.95);
+  if (inProgress.length) {
+    html += '<div class="row"><div class="row-title"><span>Reprendre</span></div><div class="row-scroll">'
+      + inProgress.slice(0, 20).map(it => posterHTML(it, it.timeOffset / it.duration)).join('')
+      + '</div></div>';
+  }
+  const watched = lib.filter(it => it.lastWatched);
+  if (watched.length) {
+    html += '<div class="row"><div class="row-title"><span>Ma bibliothèque</span></div><div class="row-scroll">'
+      + watched.slice(0, 25).map(it => posterHTML(it)).join('')
+      + '</div></div>';
+  }
+  return html;
+}
+
 async function loadHome() {
   const wrap = $('home-rows');
   wrap.innerHTML = '<div class="center-load"><div class="spinner"></div>Chargement du catalogue…</div>';
   const man = await ensureManifest();
-
-  // Addon catalogs first (skip search-required ones), Cinemeta as base browse source
-  const sources = [];
-  const addonCatalogs = (man && man.catalogs || []).filter(c => {
-    const req = (c.extra || []).filter(e => e.isRequired).map(e => e.name);
-    return !req.includes('search');
-  });
-  for (const c of addonCatalogs.slice(0, 6)) {
-    sources.push({
-      title: (c.name || c.id) + (c.type === 'series' ? ' (séries)' : c.type === 'movie' ? ' (films)' : ''),
-      base: addonBase(), type: c.type, id: c.id,
-    });
-  }
-  sources.push({ title: 'Films populaires', base: CINEMETA, type: 'movie', id: 'top' });
-  sources.push({ title: 'Séries populaires', base: CINEMETA, type: 'series', id: 'top' });
-
   wrap.innerHTML = '';
+
+  // Library first (cached, instant) — refresh in background
+  if (store.authKey) {
+    wrap.insertAdjacentHTML('beforeend', '<div id="lib-rows">' + libraryRowsHTML() + '</div>');
+    syncLibrary().then(() => {
+      const el = $('lib-rows');
+      if (el) el.innerHTML = libraryRowsHTML();
+    }).catch(() => {});
+  }
+
+  // Catalogs: manual addon + account addons (skip search-required), Cinemeta as base browse source
+  const sources = [];
+  const pushCatalogs = (manifest, base, srcTag) => {
+    const cats = (manifest && manifest.catalogs || []).filter(c => {
+      const req = (c.extra || []).filter(e => e.isRequired).map(e => e.name);
+      return !req.includes('search');
+    });
+    for (const c of cats) {
+      sources.push({
+        title: (c.name || c.id) + (c.type === 'series' ? ' (séries)' : c.type === 'movie' ? ' (films)' : ''),
+        base, type: c.type, id: c.id, srcTag,
+      });
+    }
+  };
+  if (man) pushCatalogs(man, addonBase(), 'addon');
+  for (const a of store.accountAddons) {
+    if (a.manifest && a.manifest.id === 'com.linvo.cinemeta') continue; // added below explicitly
+    pushCatalogs(a.manifest, a.url.replace(/\/manifest\.json$/, ''), 'acct:' + encodeURIComponent(a.url));
+  }
+  const capped = sources.slice(0, 8);
+  capped.push({ title: 'Films populaires', base: CINEMETA, type: 'movie', id: 'top', srcTag: 'cine' });
+  capped.push({ title: 'Séries populaires', base: CINEMETA, type: 'series', id: 'top', srcTag: 'cine' });
+
   let loaded = 0;
-  await Promise.all(sources.map(async (s) => {
+  await Promise.all(capped.map(async (s) => {
     try {
       const data = await getJSON(s.base + '/catalog/' + s.type + '/' + encodeURIComponent(s.id) + '.json');
       const metas = data.metas || [];
       if (metas.length) {
-        const hash = '#catalog/' + s.type + '/' + encodeURIComponent(s.id) + '/' + encodeURIComponent(s.base === CINEMETA ? 'cine' : 'addon');
+        const hash = '#catalog/' + s.type + '/' + encodeURIComponent(s.id) + '/' + encodeURIComponent(s.srcTag);
         wrap.insertAdjacentHTML('beforeend', rowHTML(s.title, metas, hash));
         loaded++;
       }
     } catch (e) { /* catalog unavailable, skip */ }
   }));
-  if (!loaded) {
+  if (!loaded && !store.library.length) {
     wrap.innerHTML = '<div class="empty"><div class="big">📭</div>Aucun catalogue disponible.<br>Utilise l\'onglet Recherche.</div>';
   }
 }
@@ -479,7 +690,10 @@ async function loadHome() {
 async function loadCatalogGrid(type, id, src) {
   $('catalog-grid').innerHTML = '<div class="center-load" style="grid-column:1/-1"><div class="spinner"></div></div>';
   $('catalog-title').textContent = 'Catalogue';
-  const base = src === 'cine' ? CINEMETA : addonBase();
+  let base;
+  if (src === 'cine') base = CINEMETA;
+  else if (src.startsWith('acct:')) base = decodeURIComponent(src.slice(5)).replace(/\/manifest\.json$/, '');
+  else base = addonBase();
   try {
     const data = await getJSON(base + '/catalog/' + type + '/' + encodeURIComponent(id) + '.json');
     const metas = data.metas || [];
@@ -525,15 +739,20 @@ async function loadDetail(type, id) {
   wrap.innerHTML = '<div class="center-load" style="padding-top:120px"><div class="spinner"></div></div>';
   let meta = metaCache[type + '/' + id];
   if (!meta) {
-    try {
-      const d = await getJSON(CINEMETA + '/meta/' + type + '/' + encodeURIComponent(id) + '.json');
-      meta = d.meta;
-    } catch (e) {
-      // Fallback: try the user's addon for meta
+    // Cinemeta first, then the manual addon, then any account addon serving meta for this id
+    const metaBases = [CINEMETA];
+    if (store.addon) metaBases.push(addonBase());
+    for (const a of store.accountAddons) {
+      if (!resourceNames(a.manifest).includes('meta')) continue;
+      const prefixes = a.manifest.idPrefixes;
+      if (prefixes && prefixes.length && !prefixes.some(p => id.startsWith(p))) continue;
+      metaBases.push(a.url.replace(/\/manifest\.json$/, ''));
+    }
+    for (const base of metaBases) {
       try {
-        const d = await getJSON(addonBase() + '/meta/' + type + '/' + encodeURIComponent(id) + '.json');
-        meta = d.meta;
-      } catch (e2) { meta = null; }
+        const d = await getJSON(base + '/meta/' + type + '/' + encodeURIComponent(id) + '.json');
+        if (d.meta) { meta = d.meta; break; }
+      } catch (e) { /* try next */ }
     }
     if (meta) metaCache[type + '/' + id] = meta;
   }
@@ -619,25 +838,36 @@ async function openStreams(type, encodedId, title) {
   $('sheet-body').innerHTML = '<div class="center-load"><div class="spinner"></div>Recherche des sources…</div>';
   $('sheet').classList.add('open');
   $('sheet-backdrop').classList.add('open');
-  try {
-    const data = await getJSON(addonBase() + '/stream/' + type + '/' + encodeURIComponent(id) + '.json');
-    currentStreams = data.streams || [];
-    if (!currentStreams.length) {
-      $('sheet-body').innerHTML = '<div class="empty"><div class="big">📭</div>Aucune source trouvée</div>';
-      return;
-    }
-    $('sheet-body').innerHTML = currentStreams.map((s, i) => {
-      const label = s.name || 'Stream';
-      const desc = s.description || s.title || '';
-      const badges = qualityBadges(label + ' ' + desc).map(b => '<span class="badge">' + esc(b) + '</span>').join('');
-      return '<div class="stream" id="st-' + i + '" onclick="playStream(' + i + ',\'' + esc(id).replace(/'/g, '\\\'') + '\')">'
-        + '<div class="st-info"><div class="st-name">' + esc(label) + ' ' + badges + '</div>'
-        + (desc ? '<div class="st-desc">' + esc(desc) + '</div>' : '')
-        + '</div><div class="st-play" id="stp-' + i + '">▶</div></div>';
-    }).join('');
-  } catch (e) {
-    $('sheet-body').innerHTML = '<div class="empty">Erreur : ' + esc(e.message) + '<br><br>Vérifie l\'URL de ton addon dans les réglages.</div>';
+
+  const bases = streamAddonBases();
+  if (!bases.length) {
+    $('sheet-body').innerHTML = '<div class="empty">Aucun addon de streaming configuré.<br>Connecte ton compte Stremio ou ajoute une URL d\'addon dans les Réglages.</div>';
+    return;
   }
+
+  // Query every stream-capable addon in parallel, merge results
+  const results = await Promise.all(bases.map(b =>
+    getJSON(b.base + '/stream/' + type + '/' + encodeURIComponent(id) + '.json')
+      .then(d => (d.streams || []).map(s => ({ ...s, _src: b.name })))
+      .catch(() => [])
+  ));
+  currentStreams = results.flat();
+
+  if (!currentStreams.length) {
+    $('sheet-body').innerHTML = '<div class="empty"><div class="big">📭</div>Aucune source trouvée<br><span style="font-size:12px">(' + bases.length + ' addon(s) interrogé(s))</span></div>';
+    return;
+  }
+  const showSrc = bases.length > 1;
+  $('sheet-body').innerHTML = currentStreams.map((s, i) => {
+    const label = s.name || 'Stream';
+    const desc = s.description || s.title || '';
+    const badges = qualityBadges(label + ' ' + desc).map(b => '<span class="badge">' + esc(b) + '</span>').join('');
+    const srcBadge = (showSrc && s._src) ? '<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text2)">' + esc(s._src) + '</span>' : '';
+    return '<div class="stream" id="st-' + i + '" onclick="playStream(' + i + ',\'' + esc(id).replace(/'/g, '\\\'') + '\')">'
+      + '<div class="st-info"><div class="st-name">' + esc(label) + ' ' + badges + srcBadge + '</div>'
+      + (desc ? '<div class="st-desc">' + esc(desc) + '</div>' : '')
+      + '</div><div class="st-play" id="stp-' + i + '">▶</div></div>';
+  }).join('');
 }
 
 // ======================= RealDebrid =======================
