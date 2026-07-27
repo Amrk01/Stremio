@@ -703,7 +703,7 @@ async function playStream(i, videoId) {
       url = await resolveViaRD(s);
     }
     closeSheet();
-    openPlayer(url, videoId);
+    openPlayer(url, videoId, s);
   } catch (e) {
     const msg = (e instanceof TypeError)
       ? 'Requête bloquée par le navigateur (CORS). Ce type de lien ne peut pas être résolu depuis Safari — choisis une source avec un lien direct.'
@@ -714,8 +714,35 @@ async function playStream(i, videoId) {
   if (el) el.outerHTML = prev;
 }
 
-function openPlayer(url, videoId) {
+let playWatchdog = null;
+let hlsTried = false;
+
+// Safari can't demux MKV/AVI — detect from filename to fail fast instead of spinning
+function looksUnplayable(stream, url) {
+  const f = ((stream && stream.behaviorHints && stream.behaviorHints.filename) || '') + ' ' + (url || '');
+  return /\.(mkv|avi|flv|wmv)(\?|#|\s|$)/i.test(f);
+}
+
+// RealDebrid can transcode its hosted files to HLS, which Safari plays natively
+async function tryRdHls(url) {
+  if (!store.rdKey) return null;
+  const u = await rdFetch('/unrestrict/link', { link: url });
+  if (!u || !u.id) return null;
+  const t = await rdFetch('/streaming/transcode/' + u.id);
+  const apple = t && t.apple;
+  if (!apple) return null;
+  if (typeof apple === 'string') return apple;
+  return apple.full || Object.values(apple)[0] || null;
+}
+
+function showFallback(msg) {
+  if (msg) $('fallback-msg').textContent = msg;
+  $('player-fallback').classList.add('show');
+}
+
+function openPlayer(url, videoId, stream) {
   currentVideoId = videoId;
+  hlsTried = false;
   const v = $('video');
   $('player-overlay').classList.add('open');
   $('player-fallback').classList.remove('show');
@@ -726,15 +753,47 @@ function openPlayer(url, videoId) {
   $('fb-infuse').href = 'infuse://x-callback-url/play?url=' + encodeURIComponent(url);
   $('fb-outplayer').href = 'outplayer://' + url.replace(/^https?:\/\//, '');
   $('fb-copy').onclick = () => { navigator.clipboard.writeText(url).then(() => toast('Lien copié')); };
-  $('fb-retry').onclick = () => { $('player-fallback').classList.remove('show'); v.load(); v.play(); };
+  $('fb-retry').onclick = () => { $('player-fallback').classList.remove('show'); v.load(); v.play(); armWatchdog(4000); };
+
+  const onStuck = async () => {
+    if (!hlsTried && store.rdKey) {
+      hlsTried = true;
+      toast('Conversion HLS via RealDebrid…');
+      const hls = await tryRdHls(url).catch(() => null);
+      if (hls) {
+        v.src = hls;
+        v.play().catch(() => {});
+        armWatchdog(12000);
+        return;
+      }
+    }
+    showFallback(store.rdKey
+      ? 'Safari ne peut pas lire ce format (souvent du MKV) et la conversion HLS n’est pas disponible pour ce fichier. Ouvre-le dans un lecteur compatible :'
+      : 'Safari ne peut pas lire ce format (souvent du MKV). Ajoute ta clé RealDebrid dans les Réglages pour tenter une conversion HLS, ou ouvre le lien dans un lecteur compatible :');
+  };
+
+  function armWatchdog(ms) {
+    clearTimeout(playWatchdog);
+    playWatchdog = setTimeout(() => {
+      if (v.readyState < 3 || v.paused) onStuck();
+    }, ms);
+  }
+
+  v.onplaying = () => {
+    clearTimeout(playWatchdog);
+    $('player-fallback').classList.remove('show');
+  };
+  v.onerror = onStuck;
+  v.onstalled = () => armWatchdog(5000);
 
   v.src = url;
   const resume = store.getPos(videoId);
   v.onloadedmetadata = () => {
     if (resume > 30 && resume < v.duration - 60) v.currentTime = resume;
   };
-  v.onerror = () => { $('player-fallback').classList.add('show'); };
   v.play().catch(() => {});
+  // MKV & co: don't make the user stare at a spinner — react fast
+  armWatchdog(looksUnplayable(stream, url) ? 2500 : 8000);
 
   clearInterval(posTimer);
   posTimer = setInterval(() => {
@@ -746,6 +805,7 @@ function closePlayer() {
   const v = $('video');
   if (currentVideoId && v.currentTime > 0) store.setPos(currentVideoId, v.currentTime);
   clearInterval(posTimer);
+  clearTimeout(playWatchdog);
   v.pause();
   v.removeAttribute('src');
   v.load();
